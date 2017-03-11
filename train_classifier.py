@@ -1,13 +1,28 @@
+'''
+    Main utility to Train an SVM Classifier to detect Vehicles. 
+
+    - Builds a dataset of Cars/NotCars
+    - Extracts features
+    - Performs PCA for dimensionality reduction
+    - Optional GridSearch to search for best model (working, but commented out)
+    - Saves the best model and params in a pickle file
+    - The model and params are now ready to be used by VehicleDetector for detecting vehicles in video/static images
+'''
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 
 from sklearn.preprocessing import StandardScaler
-from sklearn.svm import LinearSVC
+from sklearn.svm import LinearSVC, SVC
 from sklearn.model_selection import train_test_split
 from skimage.feature import hog
 from scipy.ndimage.measurements import label
+
+from sklearn.grid_search import GridSearchCV
+from sklearn.cross_validation import StratifiedKFold
+from sklearn.decomposition import RandomizedPCA, PCA
+from sklearn.pipeline import Pipeline
 
 from moviepy.editor import VideoFileClip
 
@@ -18,10 +33,14 @@ import time
 
 from  vehicle_detector import *
 
+## -----------------------------------------------------------------------
+
 DATA_DIR     = '/Users/aa/Developer/datasets/udacity-vehicle-detection/'
 CAR_DIR      = DATA_DIR + 'vehicles/'
 NON_VEHICLES = DATA_DIR + 'non-vehicles/'
 MODEL_DIR    = './model/'
+
+TOGGLE_PCA   = True # Toggle switch: True (do PCA); False (dont do PCA)
 
 def save_model(clf, scaler, pca_transformer, featureX, labelsY):
     ''' Save classifier and scaler, and features/labels
@@ -32,16 +51,26 @@ def save_model(clf, scaler, pca_transformer, featureX, labelsY):
     FEATURE_FILE    = MODEL_DIR + 'feats_' + msg + '.pkl'
     PCA_FILE        = MODEL_DIR + 'pca_'   + msg + '.pkl'
     SCALER_FILE     = MODEL_DIR + 'scaler' + msg + '.pkl'
-    #print('Saving model:  ', PICKLE_FILE)
 
     # save info
-    dump_data = {
-        "clf":      clf     # the classifier
-    }
+    if TOGGLE_PCA:
+        dump_data = {
+            "clf":      clf,     # the classifier
+            "scaler":   scaler,  # scaler
+            "do_pca":   True,    # YES, do PCA
+            "pca":      pca_transformer
+        }
+    else:
+        dump_data = {
+            "clf":      clf,     # the classifier
+            "scaler":   scaler,  # scaler
+            "do_pca":   False    # NO PCA
+        }
     with open(PICKLE_FILE, 'wb') as PF:
         pickle.dump(dump_data, PF)
         print('Model saved:   ', PICKLE_FILE)
 
+    """ Used for testing only
     feature_labels = {
         "features": featureX,
         "labels":   labelsY
@@ -57,7 +86,19 @@ def save_model(clf, scaler, pca_transformer, featureX, labelsY):
     with open(SCALER_FILE, 'wb') as SF:
         pickle.dump(scaler, SF)
         print('Scaler saved:  ', SCALER_FILE)
+    """
 
+
+def save_pipeline(pipeline_estimator):
+    '''
+    '''
+    loc = time.localtime()
+    msg = str(loc.tm_mon) + '_' + str(loc.tm_mday) + '_' + str(loc.tm_hour) + '_' + str(loc.tm_min)
+    PIPELINE     = MODEL_DIR + 'pipe_' + msg + '.pkl'
+
+    with open(PIPELINE, 'wb') as F:
+        pickle.dump(pipeline_estimator, F)
+        print('Saved pipeline: ', PIPELINE)
 
 def perform_pca(X, n_comp=128, show_plot=False):
     ''' Perform PCA on the given features X, and return a reduced size of X (the principal components)
@@ -67,7 +108,7 @@ def perform_pca(X, n_comp=128, show_plot=False):
         :return     pca (the transformer) 
         :return     and the PCA of X
     '''
-    from sklearn.decomposition import RandomizedPCA, PCA
+    
     
     pca = PCA(n_components=n_comp, whiten=True)
     pca = pca.fit(X)
@@ -94,9 +135,72 @@ def perform_pca(X, n_comp=128, show_plot=False):
 
     return pca, pca_features
 
+def perform_grid_search(X, y):
+    ''' Peforms grid search on X and y
+        returns best estimator and grid search
+    '''
+    print('Performing grid search')
+    pipeline_svc = Pipeline([
+        ('scaler', StandardScaler()),
+        ('pca', PCA(whiten=True)),
+        ('clf', SVC(random_state=1))
+    ])
+    n_components_range = [64, 128, 256]
+    param_range = [0.01, 0.1, 1.0, 10.0]
+    param_grid  = [
+        {'clf__C':  param_range, 'clf__kernel': ['linear'], 'pca__n_components': n_components_range},
+        {'clf__C':  param_range, 'clf__kernel': ['rbf'], 'clf__gamma': param_range, 'pca__n_components': n_components_range}
+    ]
 
+    t0 = time.time()
+    gs = GridSearchCV(estimator=pipeline_svc, 
+                    param_grid=param_grid,
+                    scoring='accuracy',
+                    cv=3,
+                    n_jobs=1, 
+                    verbose=1)
+    gs = gs.fit(X, y)
+    t1 = time.time()
+    print('-'*80)
+    print('Grid search time:', round(t1-t0, 2))
+    print('Grid search best score:', gs.best_score_)
+    print('Grid search params:', gs.best_params_)
+    print('Best estimator:\n', gs.best_estimator_)
+    print('-'*80)
 
-##### main ###########################
+    # return both the Best Estimator and grid search object
+    return gs.best_estimator_, gs
+
+def build_pipeline():
+    '''
+    '''
+    pipeline_svc = Pipeline([
+        ('scaler', StandardScaler()),
+        ('pca', PCA(whiten=True, n_components=128)),
+        ('clf', SVC(C=1.0, kernel='rbf', gamma=0.01))
+        ])
+    return pipeline_svc
+
+def save_train_params():
+    ''' Save training params -- to be used later for detection
+    '''
+    params = {
+        "color_space":  color_space,
+        "orient":       orient,
+        "pix_per_cell": pix_per_cell,
+        "cell_per_block": cell_per_block,
+        "hog_channel":  hog_channel,
+        "spatial_size": spatial_size,
+        "hist_bins":    hist_bins,
+        "spatial_feat": spatial_feat,
+        "hist_feat":    hist_feat,
+        "hog_feat":     hog_feat
+    }
+    CONFIG_FILE = './model/params.cfg'
+    with open(CONFIG_FILE, 'wb') as F:
+        pickle.dump(params, F)
+
+########################## main ###########################
 
 print('Looking for images: ', DATA_DIR)
 images =    glob.glob(DATA_DIR + '**/*.png', recursive=True)   # For Larger dataset
@@ -112,36 +216,40 @@ for image in images:
         cars.append(image)
 
 ## for testing only
-limit   = 3000
-cars    = cars[:limit]
-notcars = notcars[:limit]
+# limit   = 2000
+#cars    = cars[:limit]
+#notcars = notcars[:limit]
 
 print('Cars len    :', len(cars))
 print('Non-cars len:', len(notcars))
 
-### TODO: Tweak these parameters and see how the results change.
+### CONFIGURATION: Tweak these parameters and see how the results change.
 color_space     = 'YCrCb' # Can be RGB, HSV, LUV, HLS, YUV, YCrCb
 orient          = 9  # HOG orientations
 pix_per_cell    = 8 # HOG pixels per cell
 cell_per_block  = 2 # HOG cells per block
 hog_channel     = 'ALL' # Can be 0, 1, 2, or "ALL"
-spatial_size    = (16, 16) # Spatial binning dimensions
-hist_bins       = 16    # Number of histogram bins
+spatial_size    = (32, 32) # Spatial binning dimensions
+hist_bins       = 32    # Number of histogram bins
 spatial_feat    = True # Spatial features on or off
 hist_feat       = True # Histogram features on or off
 hog_feat        = True # HOG features on or off
 y_start_stop    = [400, 680] # Min and max in y to search in slide_window()
 
+# save params
+save_train_params()
+
+print('PCA: ', TOGGLE_PCA)
 
 print('Using:', 
     color_space, ' color_space, ', 
     orient,'orientations, ',
     pix_per_cell, 'pixels/cell,', 
     cell_per_block,'cells/block, ',
-    'hog_channel=', hog_channel,
-    'hist_bins=', hist_bins,
-    'spatial_size=', spatial_size,
-    'y_start_stop=', y_start_stop )
+    'hog_channel:', hog_channel,
+    ',hist_bins:', hist_bins,
+    ',spatial_size:', spatial_size,
+    ',y_start_stop:', y_start_stop )
 
 print('Extracting features...')
 
@@ -179,7 +287,7 @@ print('  Notcar features done: in {0} secs'.format(round(t2-t1, 2)))
 print('Features :', len(car_features[0]))
 
 
-## Train SVM Classifier
+## Stack up the data
 X = np.vstack((car_features, notcar_features)).astype(np.float64)                        
 # Fit a per-column scaler
 X_scaler = StandardScaler().fit(X)
@@ -189,23 +297,58 @@ scaled_X = X_scaler.transform(X)
 # Define the labels vector
 y = np.hstack((np.ones(len(car_features)), np.zeros(len(notcar_features))))
 
-## Perform PCA on scaled_X
-pca_transformer, X_pca = perform_pca(scaled_X, n_comp=512)
-
-# Split up data into randomized training and test sets
 rand_state = np.random.randint(0, 100)
-X_train, X_test, y_train, y_test = train_test_split(X_pca, y, 
-                                                    test_size=0.2, random_state=rand_state)
 
+if TOGGLE_PCA:
+    ## Perform PCA on scaled_X
+    pca_transformer, X_pca = perform_pca(scaled_X, n_comp=64)
+
+    # Split up data into randomized training and test sets
+    X_train, X_test, y_train, y_test = train_test_split(X_pca, y, 
+                                                        test_size=0.2, random_state=rand_state)
+else:  
+    print('NOT performing PCA')
+    pca_transformer = None
+    # Split up data into randomized training and test sets
+    X_train, X_test, y_train, y_test = train_test_split(scaled_X, y, 
+                                                        test_size=0.2, random_state=rand_state)
+    
 
 print('X_train: ', X_train.shape)
 print('y_train: ', y_train.shape)
 print('X_test:  ', X_test.shape)
 print('y_test:  ', y_test.shape)
 
+"""
+## Do grid search
+# best_estimator, gs  = perform_grid_search(X_train, y_train)
+
+## Get built-in Pipeline
+best_estimator = build_pipeline()
+
+# now use the best estimator to train/fit and score
+## Train the Classifier
+t3  = time.time()
+best_estimator.fit(X_train, y_train)
+t4  = time.time()
+print('Train time:', round(t4-t3, 2), ' secs')
+# Check the score of the SVC
+print('>> Test Accuracy of Estimator: ', round(best_estimator.score(X_test, y_test), 4))
+# Check the prediction time for a single sample
+t5  = time.time()
+print('Test  time:', round(t5-t4, 2), ' secs')
+
+## Save Pipeline
+save_pipeline(best_estimator)
+
+"""
+
 ## Fit the model
-# Use a linear SVC 
-svc = LinearSVC(max_iter=8000)
+# Use a  SVC 
+if TOGGLE_PCA:
+    svc = SVC(C=10.0, kernel='rbf', gamma=0.01)      # LinearSVC(max_iter=8000)
+else:
+    svc = LinearSVC(C=0.08, loss='hinge')
 # Check the training time for the SVC
 print(svc)
 t3  = time.time()
@@ -220,6 +363,6 @@ t5  = time.time()
 print('Test  time:', round(t5-t4, 2), ' secs')
 
 ## Save Model, Scaler and  Features/Labels
-save_model(svc, X_scaler, pca_transformer, X_pca, y)
+save_model(svc, X_scaler, pca_transformer, scaled_X, y)
 
 print('Done')

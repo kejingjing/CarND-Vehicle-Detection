@@ -1,13 +1,34 @@
+'''
+    VehicleDetector
+    - Main class used for vehicle detection
+    - First, train the Classifier (using train_classifier.py). This outputs MODEL_FILE and CONFIG_FILE.
+    - Then, use this utility to detect vehicles
+    - Ensure that MODEL_FILE and CONFIG_FILE is correctly available to VehicleDetector
+    - Can be used on Video or static images
+
+    Code and algorithm is largely based on Udacity lessons
+'''
 
 import matplotlib.image as mpimg
+import matplotlib.pyplot as plt
 import numpy as np
 import cv2
 from skimage.feature import hog
 from scipy.ndimage.measurements import label
 import time
 
+from sklearn.pipeline import Pipeline
+import pickle
+import os
+import glob
+
+from moviepy.editor import VideoFileClip
+
+## -----------------------------------------------------------------------
+
 ## constants
-QUEUE_SIZE = 5
+BUFFER_SIZE      = 8   # was 3
+COLOR_SALMON    = (250, 128, 114)
 
 def convert_color(img, conv='RGB2YCrCb'):
     if conv == 'RGB2YCrCb':
@@ -37,35 +58,12 @@ def get_hog_features(img, orient, pix_per_cell, cell_per_block,
                        visualise=vis, feature_vector=feature_vec)
         return features
 
-"""
-# Define a function to compute binned color features  
-def bin_spatial(img, size=(32, 32)):
-    # Use cv2.resize().ravel() to create the feature vector
-    features = cv2.resize(img, size).ravel() 
-    # Return the feature vector
-    return features
-"""
-
 ### - from Hog Sub Sampling Window - 
 def bin_spatial(img, size=(32, 32)):
     color1 = cv2.resize(img[:,:,0], size).ravel()
     color2 = cv2.resize(img[:,:,1], size).ravel()
     color3 = cv2.resize(img[:,:,2], size).ravel()
     return np.hstack((color1, color2, color3))
-
-"""
-# Define a function to compute color histogram features 
-# NEED TO CHANGE bins_range if reading .png files with mpimg!
-def color_hist(img, nbins=32, bins_range=(0, 256)):
-    # Compute the histogram of the color channels separately
-    channel1_hist = np.histogram(img[:,:,0], bins=nbins, range=bins_range)
-    channel2_hist = np.histogram(img[:,:,1], bins=nbins, range=bins_range)
-    channel3_hist = np.histogram(img[:,:,2], bins=nbins, range=bins_range)
-    # Concatenate the histograms into a single feature vector
-    hist_features = np.concatenate((channel1_hist[0], channel2_hist[0], channel3_hist[0]))
-    # Return the individual histograms, bin_centers and feature vector
-    return hist_features
-"""
 
 ## Compute color histogram features
 def color_hist(img, nbins=32):    #bins_range=(0, 256)
@@ -230,7 +228,11 @@ def single_img_features(img, color_space='RGB', spatial_size=(32, 32),
 
 # Define a function you will pass an image 
 # and the list of windows to be searched (output of slide_windows())
-def search_windows(img, windows, clf, scaler, color_space='RGB', 
+def search_windows(img, windows, 
+                    clf, 
+                    scaler, 
+                    pca,
+                    color_space='RGB', 
                     spatial_size=(32, 32), hist_bins=32, 
                     hist_range=(0, 256), orient=9, 
                     pix_per_cell=8, cell_per_block=2, 
@@ -243,9 +245,14 @@ def search_windows(img, windows, clf, scaler, color_space='RGB',
         :param windows - list of windows to search for (output of slide_windows())
         :param clf - the trained classifier that predicts if a vehicle exists in the image
         :param scaler - the scaler transformer
+        :param pca      - PCA transformer
 
         :return hot_windows - a list of windows (bounding boxes) that possibly contain a vehicle
     '''
+
+    last_feat_vec = None
+    last_test_feat = None
+    last_pca_feat = None 
 
     #1) Create an empty list to receive positive detection windows
     on_windows = []
@@ -261,18 +268,30 @@ def search_windows(img, windows, clf, scaler, color_space='RGB',
                             hog_channel=hog_channel, spatial_feat=spatial_feat, 
                             hist_feat=hist_feat, hog_feat=hog_feat)
         #5) Scale extracted features to be fed to classifier
-        test_features = scaler.transform(np.array(features).reshape(1, -1))
+        # 5a) Transform using our pipeline: Scale and apply PCA
+        # test_features = estimator_pipeline.transform(np.array(features).reshape(1, -1))
+        test_features   = scaler.transform(np.array(features).reshape(1, -1))
+        if pca is not None:   # perform PCA
+            pca_features    = pca.transform(test_features)
+        else:               
+            pca_features    = test_features
         #6) Predict using your classifier
-        prediction = clf.predict(test_features)
+        prediction = clf.predict(pca_features)
         #7) If positive (prediction == 1) then save the window
         if prediction == 1:
             on_windows.append(window)
+        
+    ### DEBUG ONLY: TODO: REMOVE THIS
+    last_feat_vec = features  # TODO: DEBUG ONLY
+    last_test_feat = test_features
+    last_pca_feat = pca_features
+    # print(' [len features=', len(last_feat_vec), ' test_features=', last_test_feat.shape, ' pca_feat=', last_pca_feat.shape)
     #8) Return windows for positive detections
     return on_windows
 
 
 # Define a function to draw bounding boxes
-def draw_boxes(img, bboxes, color=(0, 0, 255), thick=6):
+def draw_boxes(img, bboxes, color=(250, 0, 255), thick=6):
     # Make a copy of the image
     imcopy = np.copy(img)
     # Iterate through the bounding boxes
@@ -312,28 +331,39 @@ def draw_labeled_bboxes(img, labels):
         # Define a bounding box based on min/max x and y
         bbox = ((np.min(nonzerox), np.min(nonzeroy)), (np.max(nonzerox), np.max(nonzeroy)))
         # Draw the box on the image
-        cv2.rectangle(img, bbox[0], bbox[1], (0,0,255), 6)
+        cv2.rectangle(img, bbox[0], bbox[1], COLOR_SALMON, 6)
     # Return the image
     return img
 
+class FrameBuffer:
+    ''' Buffer of heatmaps
+    '''
+    def __init__(self, max_frames):
+        self.frames = []
+        self.max_frames = max_frames
+    
+    def add_queue(self, frame):
+        self.frames.insert(0, frame)
 
-'''
-color_space     = 'YCrCb' # Can be RGB, HSV, LUV, HLS, YUV, YCrCb
-orient          = 9  # HOG orientations
-pix_per_cell    = 8 # HOG pixels per cell
-cell_per_block  = 2 # HOG cells per block
-hog_channel     = 'ALL' # Can be 0, 1, 2, or "ALL"
-spatial_size    = (16, 16) # Spatial binning dimensions
-hist_bins       = 32    # Number of histogram bins
-spatial_feat    = True # Spatial features on or off
-hist_feat       = True # Histogram features on or off
-hog_feat        = True # HOG features on or off
-y_start_stop = [400, 680] # Min and max in y to search in slide_window()
+    def bufsize(self):
+        return len(self.frames)
+        
+    def pop_queue(self):
+        before = len(self.frames)
+        self.frames.pop()
+        after  = len(self.frames)
+    
+    def add_frames(self):
+        if self.bufsize() > self.max_frames:
+            self.pop_queue()
+        all_frames = np.array(self.frames)
+        return np.sum(all_frames, axis=0)
 
-'''
 
 class VehicleDetector:
-    '''  Class that detects vehicles in a frame
+    '''  Main class that detects vehicles in a frame
+        Initialize with CONFIG PARAMs that were used to train the classifier
+        Then use process_frame() method on each frame/image to detect vehicles. Output is a frame with bounding box drawn.
     '''
     def __init__(self, 
                 color_space, 
@@ -351,51 +381,92 @@ class VehicleDetector:
                 xy_window,
                 xy_overlap,
                 heat_threshold,
-                clf,        # trained classifier
-                scaler     # scaler for transforming inputs
+                clf,                # trained classifier
+                scaler,             # scaler for transforming input feature vector
+                pca                 # PCA transformer
         ):
-        self.color_space     = color_space   # Can be RGB, HSV, LUV, HLS, YUV, YCrCb
-        self.orient          = orient       # HOG orientations
-        self.pix_per_cell    = pix_per_cell8 # HOG pixels per cell
-        self.cell_per_block  = cell_per_block2 # HOG cells per block
-        self.hog_channel     = hog_channel   # 0, 1, 2, 'ALL'
-        self.spatial_size    = spatial_size # Spatial binning dimensions
-        self.hist_bins       = hist_bins    # Number of histogram bins
-        self.spatial_feat    = spatial_feat # Spatial features on or off
-        self.hist_feat       = hist_feat # Histogram features on or off
-        self.hog_feat        = hog_feat  # HOG features on or off
-        self.y_start_stop    = y_start_stop # Min and max in y to search in slide_window()
+        self.color_space     = color_space      # Can be RGB, HSV, LUV, HLS, YUV, YCrCb
+        self.orient          = orient           # HOG orientations
+        self.pix_per_cell    = pix_per_cell     # HOG pixels per cell
+        self.cell_per_block  = cell_per_block   # HOG cells per block
+        self.hog_channel     = hog_channel      # 0, 1, 2, 'ALL'
+        self.spatial_size    = spatial_size     # Spatial binning dimensions
+        self.hist_bins       = hist_bins        # Number of histogram bins
+        self.spatial_feat    = spatial_feat     # Spatial features on or off
+        self.hist_feat       = hist_feat        # Histogram features on or off
+        self.hog_feat        = hog_feat         # HOG features on or off
+        self.y_start_stop    = y_start_stop     # Min and max in y to search in slide_window()
         self.x_start_stop    = x_start_stop
-        self.xy_window       = xy_window
-        self.xy_overlap      = xy_overlap
-        self.heat_threshold  = heat_threshold
-        self.clf             = clf 
-        self.scaler          = scaler
+        self.xy_window       = xy_window        # window to search for
+        self.xy_overlap      = xy_overlap       # overlap [0,1]
+        self.heat_threshold  = heat_threshold   # threshold for false positives; typically 1-5
+        self.clf             = clf              # trained classifier    
+        self.scaler          = scaler           # scaler for transforming features: 
+        self.pca             = pca              # PCA transformer (if not None)
 
+        self.frame_buffer   = FrameBuffer(BUFFER_SIZE)
         self.process_time   = []   # saves seconds required to process each frame
 
-    
-    
-    def process_frame(self, frame):
-        '''  Process each frame to detect a vehicle in it, and return a bounded box on it 
+    def print(self):
+        ''' Print self config info 
         '''
-        img_copy = np.copy(frame)
-        img_copy = img_copy.astype(np.float32) / 255.
+        print('-'*40)
+        msg  = '[color={}, orient={}, pix/cell={}, cell/bk={}, hog={}\n'.format(self.color_space,
+            self.orient, self.pix_per_cell, self.cell_per_block, self.hog_channel)
+        msg2 = ' spatial_size={}, hist_bins={}, y_start_stop={}, xy_window={}, xy_overlap={} thresh={}]'.format(
+            self.spatial_size, self.hist_bins, self.y_start_stop, self.xy_window, self.xy_overlap, self.heat_threshold)
+        print(msg + msg2)
+        #print(self.estimator_pipeline)
+        print(self.clf)
+        print('PCA:', self.pca)
+        print('-'*40)
+    
+    def process_frame(self, image, show_heatmap=False, show_box=False):
+        '''  Process each frame to detect a vehicle in it, and return a bounded box on it.
+            Uses sliding window search algorithm to detect vehicles. Sliding windows determined by Y start/stop and xy_window config params.
+            Builds a list of slidind windows, then searches within those windows for vehicles using our given Classifier. 
+            After detecting vehicles, draws a bounding box around them. Remove false positives by combining over the last N frames, 
+            (maintained by FrameBuffer class) using heatmap. 
+
+            :return image with bounding box drawn around detected vehicle
+        '''
+        draw_image = np.copy(image)
+        image = image.astype(np.float32) / 255.
 
         t0 = time.time()   # for processing
 
-        # 1 - find sliding windows in frame
-        sliding_windows = slide_window(img_copy, 
-                                    x_start_stop=self.x_start_stop,
-                                    y_start_stop=self.y_start_stop, 
-                                    xy_window=self.xy_window,
-                                    xy_overlap=self.xy_overlap
-                            )
+        # 0.1 - define search window Y start/stop
+        Y_START_STOPS = [
+            [400, 500],
+            [480, 680]
+        ]
+
+        # 0.2 - search window sizes: small windows in the horizon, larger windows closer 
+        XY_WINDOWS = [
+            (80, 80),
+            (96, 96)
+        ]
+
+        sliding_windows = []
+
+        for i, _ in enumerate(XY_WINDOWS):
+            interim_y_start_stop = Y_START_STOPS[i]
+            interim_xy_window    = XY_WINDOWS[i]
+
+            # 1 - find sliding windows in frame
+            _interim_windows = slide_window(image, 
+                                        x_start_stop=self.x_start_stop,
+                                        y_start_stop=interim_y_start_stop, 
+                                        xy_window=interim_xy_window,
+                                        xy_overlap=self.xy_overlap)
+            sliding_windows.extend(_interim_windows)
+                
         # 2 - search for hot windows within these sliding_windows
-        hot_windows = search_windows(img_copy, 
+        hot_windows = search_windows(image, 
                                     sliding_windows,
-                                    clf=self.clf,
-                                    scaler=self.scaler,
+                                    self.clf,               
+                                    self.scaler,            
+                                    self.pca,
                                     color_space=self.color_space,
                                     spatial_size=self.spatial_size,
                                     hist_bins=self.hist_bins,
@@ -405,22 +476,37 @@ class VehicleDetector:
                                     hog_channel=self.hog_channel,
                                     spatial_feat=self.spatial_feat,
                                     hist_feat=self.hist_feat,
-                                    hog_feat=self.hog_feat
-                        )
+                                    hog_feat=self.hog_feat)
+        
+        # DEBUG -- 
+        # print(' [] hot_wins:', len(hot_windows))
+        if show_box:
+            boxed_img = draw_boxes(draw_image, hot_windows, color=(0,255,127), thick=2)
+            return boxed_img
+
         # 3a - heat map init
-        heatmap = np.zeros_like(img_copy[:,:,0]).astype(np.float)
+        heat = np.zeros_like(image[:,:,0]).astype(np.float)
         # 3b - add heat
-        heatmap = add_heat(heatmap, hot_windows)
-        # 3c - TODO Buffer frame
+        heat = add_heat(heat, hot_windows)
+        # 3c -  Buffer frame
+        self.frame_buffer.add_queue(heat)
+
+        all_frames = self.frame_buffer.add_frames()
 
         # 3d - apply heatmap threshold to excl false positives
-        heatmap = apply_threshold(heatmap, self.heat_threshold)
+        heat = apply_threshold(all_frames, self.heat_threshold)
+
+        # Visualize the heatmap when displaying    
+        heatmap = np.clip(heat, 0, 255)
+
+        if show_heatmap:
+            return heatmap
 
         # 4 - get labels
         labels = label(heatmap)
 
         # 5 - draw bboxes
-        processed_img = draw_labeled_bboxes(frame, labels)
+        processed_img = draw_labeled_bboxes(draw_image, labels)
 
         # for debug - time reqd to process
         t2 = time.time()
@@ -429,7 +515,7 @@ class VehicleDetector:
 
         return processed_img
 
-    def process_info(self):
+    def show_process_info(self):
         ''' Show total processing info
         '''
         frames = len(self.process_time)
@@ -441,3 +527,138 @@ class VehicleDetector:
         )
         print(msg)
 
+
+###################################################################
+def main():
+   
+    #PIPELINE_FILE = './model/pipe_3_9_19_33.pkl'
+    #MODEL_FILE  = './model/model_3_10_11_0.pkl'  # No PCA
+    #MODEL_FILE  = './model/model_3_10_12_33.pkl' # PCA_64: acc 0.99
+    #MODEL_FILE  = './model/model_3_10_13_27.pkl' # PCA_64, acc 0.99, 4932 feat
+    #MODEL_FILE  = './model/model_3_10_15_49.pkl' # No PCA, acc 0.9938, 8460 feat
+    MODEL_FILE  = './model/model_3_10_16_13.pkl'  # PCA_64; acc 0.9983, 8460 feat
+    # SCALER_FILE = './model/scaler3_10_0_4.pkl'
+    # PCA_FILE    = './model/pca_3_10_0_4.pkl'
+    CONFIG_FILE = './model/params.cfg'
+
+    """
+    pipeline_estimator = None
+    print('Loading pipeline estimator:', PIPELINE_FILE)
+    with open(PIPELINE_FILE, 'rb') as FIN:
+        pipeline_estimator = pickle.load(FIN)
+
+    print('Estimator:\n', pipeline_estimator)
+    """
+
+    clf     = None
+    scaler  = None
+    pca     = None
+    with open(MODEL_FILE, 'rb') as M:
+        data    = pickle.load(M)
+        clf     = data["clf"]
+        scaler  = data["scaler"]
+        do_pca  = data["do_pca"]
+        if do_pca:
+            pca     = data["pca"]   # DO perform PCA
+        else:
+            pca     = None          # DO NOT PERFORM PCA
+        print('Read model:', MODEL_FILE)
+
+    ## Read config params (used in training)
+    with open(CONFIG_FILE, 'rb') as CF:
+        cfg     = pickle.load(CF)
+
+    color_space     = cfg["color_space"]
+    orient          = cfg["orient"]
+    pix_per_cell    = cfg["pix_per_cell"]
+    cell_per_block  = cfg["cell_per_block"]
+    hog_channel     = cfg["hog_channel"]
+    spatial_size    = cfg["spatial_size"]
+    hist_bins       = cfg["hist_bins"]
+    spatial_feat    = cfg["spatial_feat"]
+    hist_feat       = cfg["hist_feat"]
+    hog_feat        = cfg["hog_feat"]
+
+    y_start_stop    = [400, 680] # Min and max in y to search in slide_window()
+    heat_threshold  = 4
+
+    
+    vehicle_detector = VehicleDetector(
+        color_space=color_space,
+        orient=orient,
+        pix_per_cell=pix_per_cell,
+        cell_per_block=cell_per_block,
+        hog_channel=hog_channel,
+        spatial_size=spatial_size,
+        hist_bins=hist_bins,
+        spatial_feat=spatial_feat,
+        hist_feat=hist_feat,
+        hog_feat=hog_feat,
+        x_start_stop=[None, None],
+        y_start_stop=y_start_stop,
+        xy_window=(96, 96),
+        xy_overlap=(0.75, 0.75),
+        heat_threshold=heat_threshold,
+        clf=clf,           
+        scaler=scaler, 
+        pca=pca)
+
+    vehicle_detector.print()
+
+    """# -- For testing static images ---
+    test_images = [
+        './test_images/test6.jpg',
+        './test_images/test1.jpg',
+        './test_images/test5.jpg',
+        './test_images/test3.jpg',
+        './test_images/test4.jpg',
+        './test_images/test2.jpg'
+        ]
+
+    print('Running test..')
+
+
+    for test_img in test_images:
+        imgtest = mpimg.imread(test_img)
+        out_img = vehicle_detector.process_frame(imgtest, show_box=False, show_heatmap=False)
+        plt.imshow(out_img)
+        plt.title(test_img)
+        plt.show()
+
+    
+    ### More tests... mine
+
+    TEST_DIR = './model/'
+    OUT_DIR  = './out/'
+    tests = glob.glob(TEST_DIR + '*_rand*.jpg')
+    print('Running tests..')
+    for test_img in tests:
+        imgtest = mpimg.imread(test_img)
+        #print('processing:', test_img)
+        out_img = vehicle_detector.process_frame(imgtest, show_box=False, show_heatmap=False)
+        outfile = OUT_DIR + 'out_' + test_img.split('/')[2]
+        plt.imsave(outfile, out_img)
+        #print('saved out:', outfile)
+
+
+    """
+
+    ### Testing video
+
+    video_in  = './project_video.mp4'
+    clip = VideoFileClip(video_in)
+
+    video_out = './output_images/sub_video_new_pca_buf8_th4_y96_all.mp4'
+
+    clip_out = clip.fl_image(vehicle_detector.process_frame)
+    clip_out.write_videofile(video_out, audio=False)
+
+    
+
+    # processing info
+    vehicle_detector.show_process_info()
+
+    
+
+if __name__ == '__main__':
+    main()
