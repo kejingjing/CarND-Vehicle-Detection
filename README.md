@@ -86,7 +86,9 @@ The model is saved in `MODEL_FILE` and config params in `CONFIG_FILE` defined in
 
 ### Sliding Window Search 
 
-I used the sliding window search algorithm described in the lessons to create a list of windows to search for, and within the windows used the classifier to detect vehicles. The code is implemented in `vehicle_detector.py` in `slide_window()`(lines 132:177) and `search_windows()`(lines 229-290). The system is set to use varying window sizes (80x80 and 96x96) depending on whether we are searching near the horizon or closer.  The sliding window output is shown here:
+I used the sliding window search algorithm described in the lessons to create a list of windows to search for, and within the windows used the classifier to detect vehicles. The code is implemented in `vehicle_detector.py` in `slide_window()`(lines 132:177) and `search_windows()`(lines 229-290). The system is set to use varying window sizes (80x80 and 96x96) depending on whether we are searching near the horizon or closer. Using smaller window sizes (64x64) results in very large search times especially. The values currently used (80x80 and 96x96) were determined to reduce detection time, while still finding the vehicles optimally. Further tuning might be needed in some cases.
+
+The sliding window output is shown here:
 
 ![slide1](output_images/slide1.png)
 ![slide2](output_images/slide2.png)
@@ -97,7 +99,7 @@ Once a vehicle is detected, we create a heatmap to show where the cars might be.
 ![heat1](output_images/heat1.png)
 ![heat2](output_images/heat2.png)
 
-Finally, using a threshold on the heatmaps to remove false positives, we draw bounding box across the car.
+Finally, using a threshold on the heatmaps to remove false positives, we draw bounding box across the car. I experimented with various threshold levels (from 1 to 10), and found that smaller number (1-5) seemed to work best. However, there might still be some (very few) false positives.
 
 ![detect1](output_images/detect1.png)
 ![detect2](output_images/detect2.png)
