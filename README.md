@@ -7,7 +7,9 @@ The main goal in this project is to create a software pipeline to detect vehicle
 ## Results
 
 The following video shows the final results of vehicles being detected:
-[!Track 1](output_images/processed_video.mp4)
+
+[![Vehicle Detection](./output_images/yt_vehicle_detect.png)](https://www.youtube.com/watch?v=VKberP6XJqA&feature=youtu.be)
+
 
 The goals / steps of this project are the following:
 
